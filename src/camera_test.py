@@ -7,7 +7,7 @@ from time import perf_counter
 from typing import Any
 
 from .config import TestConfig
-from .result_types import CameraTestResult
+from .result_types import CameraTestResult, LivePreviewResult
 
 
 class CameraTestError(RuntimeError):
@@ -22,32 +22,32 @@ class RuntimeDependencies:
 
 
 def load_runtime_dependencies() -> RuntimeDependencies:
-    missing: list[str] = []
+    errors: list[str] = []
 
-    try:
-        neoapi = import_module("neoapi")
-    except ModuleNotFoundError:
-        neoapi = None
-        missing.append("neoapi")
+    neoapi = _load_optional_dependency(
+        import_name="neoapi",
+        package_name="neoapi",
+        install_hint=(
+            "Install Baumer's official neoAPI Python package for your Python version. "
+            "Do not rely on the unrelated `neoapi` package from PyPI if it imports with Python 2 syntax."
+        ),
+        errors=errors,
+    )
+    cv2 = _load_optional_dependency(
+        import_name="cv2",
+        package_name="opencv-python",
+        install_hint="Install it with `pip install -r requirements.txt`.",
+        errors=errors,
+    )
+    numpy = _load_optional_dependency(
+        import_name="numpy",
+        package_name="numpy",
+        install_hint="Install it with `pip install -r requirements.txt`.",
+        errors=errors,
+    )
 
-    try:
-        cv2 = import_module("cv2")
-    except ModuleNotFoundError:
-        cv2 = None
-        missing.append("opencv-python")
-
-    try:
-        numpy = import_module("numpy")
-    except ModuleNotFoundError:
-        numpy = None
-        missing.append("numpy")
-
-    if missing:
-        raise CameraTestError(
-            "Missing runtime dependencies: "
-            + ", ".join(missing)
-            + ". Install them with `pip install -r requirements.txt`."
-        )
+    if errors:
+        raise CameraTestError("Runtime dependency check failed:\n- " + "\n- ".join(errors))
 
     return RuntimeDependencies(neoapi=neoapi, cv2=cv2, numpy=numpy)
 
@@ -135,6 +135,103 @@ def run_headless_test(config: TestConfig) -> CameraTestResult:
     )
 
 
+def run_live_preview(
+    config: TestConfig,
+    stream_seconds: float | None = None,
+    preview_max_width: int = 1280,
+) -> LivePreviewResult:
+    if config.grab_timeout_ms <= 0:
+        raise CameraTestError("grab_timeout_ms must be greater than zero.")
+    if preview_max_width <= 0:
+        raise CameraTestError("preview_max_width must be greater than zero.")
+    if stream_seconds is not None and stream_seconds <= 0:
+        raise CameraTestError("stream_seconds must be greater than zero when provided.")
+
+    dependencies = load_runtime_dependencies()
+    cam = dependencies.neoapi.Cam()
+    window_name = "Baumer Live Preview"
+    metadata = CameraMetadata(None, None, None, None, None, None)
+    frames_displayed = 0
+    started_at = 0.0
+
+    try:
+        _connect_camera(cam, config.camera_id)
+        metadata = _read_camera_metadata(cam)
+        dependencies.cv2.namedWindow(window_name, dependencies.cv2.WINDOW_NORMAL)
+        started_at = perf_counter()
+
+        while True:
+            image = _get_image(cam, config.grab_timeout_ms)
+            try:
+                frame = image.GetNPArray()
+            except Exception as exc:
+                raise CameraTestError(f"Failed to convert preview frame to a NumPy array: {exc}") from exc
+
+            if not isinstance(frame, dependencies.numpy.ndarray):
+                frame = dependencies.numpy.asarray(frame)
+
+            frames_displayed += 1
+            elapsed_seconds = perf_counter() - started_at
+            preview_frame = _prepare_preview_frame(
+                frame=frame,
+                pixel_format=metadata.pixel_format,
+                cv2_module=dependencies.cv2,
+                max_width=preview_max_width,
+            )
+            _draw_preview_overlay(
+                frame=preview_frame,
+                fps=frames_displayed / elapsed_seconds if elapsed_seconds > 0 else 0.0,
+                pixel_format=metadata.pixel_format,
+                cv2_module=dependencies.cv2,
+            )
+            dependencies.cv2.imshow(window_name, preview_frame)
+
+            key = dependencies.cv2.waitKey(1) & 0xFF
+            if key in (27, ord("q"), ord("Q")):
+                break
+
+            if stream_seconds is not None and elapsed_seconds >= stream_seconds:
+                break
+
+            if dependencies.cv2.getWindowProperty(window_name, dependencies.cv2.WND_PROP_VISIBLE) < 1:
+                break
+    except CameraTestError as exc:
+        return LivePreviewResult(
+            success=False,
+            camera_model=metadata.model,
+            camera_id=metadata.device_id,
+            camera_ip=metadata.ip_address,
+            pixel_format=metadata.pixel_format,
+            image_width=metadata.width,
+            image_height=metadata.height,
+            frames_displayed=frames_displayed,
+            elapsed_seconds=0.0 if started_at == 0.0 else perf_counter() - started_at,
+            fps=0.0,
+            error=str(exc),
+        )
+    finally:
+        try:
+            dependencies.cv2.destroyAllWindows()
+        except Exception:
+            pass
+        _disconnect_camera(cam)
+
+    elapsed_seconds = perf_counter() - started_at
+    fps = frames_displayed / elapsed_seconds if elapsed_seconds > 0 else 0.0
+    return LivePreviewResult(
+        success=True,
+        camera_model=metadata.model,
+        camera_id=metadata.device_id,
+        camera_ip=metadata.ip_address,
+        pixel_format=metadata.pixel_format,
+        image_width=metadata.width,
+        image_height=metadata.height,
+        frames_displayed=frames_displayed,
+        elapsed_seconds=elapsed_seconds,
+        fps=fps,
+    )
+
+
 def describe_runtime() -> dict[str, str]:
     dependencies = load_runtime_dependencies()
     versions = {
@@ -143,6 +240,28 @@ def describe_runtime() -> dict[str, str]:
         "numpy": _read_module_version(dependencies.numpy),
     }
     return versions
+
+
+def _load_optional_dependency(
+    import_name: str,
+    package_name: str,
+    install_hint: str,
+    errors: list[str],
+) -> Any:
+    try:
+        return import_module(import_name)
+    except ModuleNotFoundError:
+        errors.append(
+            f"{package_name} is not installed or not visible to this interpreter. {install_hint}"
+        )
+    except SyntaxError as exc:
+        errors.append(
+            f"{package_name} failed to import because the installed package is not Python 3 compatible "
+            f"({exc.msg} in {exc.filename}:{exc.lineno}). {install_hint}"
+        )
+    except Exception as exc:
+        errors.append(f"{package_name} failed to import: {exc}. {install_hint}")
+    return None
 
 
 @dataclass(frozen=True)
@@ -229,6 +348,54 @@ def _save_artifacts(first_frame: Any, last_frame: Any, output_dir: Path, cv2_mod
         raise CameraTestError(f"Failed to write artifact: {last_frame_path}")
 
     return first_frame_path, last_frame_path
+
+
+def _prepare_preview_frame(frame: Any, pixel_format: str | None, cv2_module: Any, max_width: int) -> Any:
+    preview_frame = frame
+    normalized_format = (pixel_format or "").lower()
+
+    if normalized_format == "bayerrg8":
+        preview_frame = cv2_module.cvtColor(frame, cv2_module.COLOR_BayerRG2BGR)
+    elif normalized_format == "bayerbg8":
+        preview_frame = cv2_module.cvtColor(frame, cv2_module.COLOR_BayerBG2BGR)
+    elif normalized_format == "bayergr8":
+        preview_frame = cv2_module.cvtColor(frame, cv2_module.COLOR_BayerGR2BGR)
+    elif normalized_format == "bayergb8":
+        preview_frame = cv2_module.cvtColor(frame, cv2_module.COLOR_BayerGB2BGR)
+    elif len(getattr(frame, "shape", ())) == 2:
+        preview_frame = cv2_module.cvtColor(frame, cv2_module.COLOR_GRAY2BGR)
+
+    height, width = preview_frame.shape[:2]
+    if width > max_width:
+        scale = max_width / width
+        preview_frame = cv2_module.resize(
+            preview_frame,
+            (int(width * scale), int(height * scale)),
+            interpolation=cv2_module.INTER_AREA,
+        )
+
+    return preview_frame
+
+
+def _draw_preview_overlay(frame: Any, fps: float, pixel_format: str | None, cv2_module: Any) -> None:
+    overlay_lines = [
+        f"FPS {fps:.2f}",
+        f"FORMAT {pixel_format or 'unknown'}",
+        "Press Q or Esc to quit",
+    ]
+    y = 30
+    for line in overlay_lines:
+        cv2_module.putText(
+            frame,
+            line,
+            (10, y),
+            cv2_module.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+            cv2_module.LINE_AA,
+        )
+        y += 30
 
 
 def _read_camera_metadata(cam: Any) -> CameraMetadata:

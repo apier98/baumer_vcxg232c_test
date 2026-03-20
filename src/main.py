@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from .camera_test import CameraTestError, describe_runtime, run_headless_test
+from .camera_test import CameraTestError, describe_runtime, run_headless_test, run_live_preview
 from .config import TestConfig
 
 
@@ -53,6 +53,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit machine-readable JSON instead of the plain-text summary.",
     )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Open a lightweight live preview window instead of running the bounded frame test.",
+    )
+    parser.add_argument(
+        "--stream-seconds",
+        type=float,
+        default=None,
+        help="Optional auto-stop duration for preview mode. Without this, preview runs until you press q or Esc.",
+    )
+    parser.add_argument(
+        "--preview-max-width",
+        type=int,
+        default=1280,
+        help="Maximum preview window width in pixels. Larger frames are downscaled for display only.",
+    )
     return parser
 
 
@@ -72,7 +89,14 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        result = run_headless_test(config)
+        if args.preview:
+            result = run_live_preview(
+                config=config,
+                stream_seconds=args.stream_seconds,
+                preview_max_width=args.preview_max_width,
+            )
+        else:
+            result = run_headless_test(config)
     except CameraTestError as exc:
         if args.json:
             print(json.dumps({"success": False, "error": str(exc)}))

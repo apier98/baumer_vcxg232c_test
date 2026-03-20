@@ -24,7 +24,7 @@ README.md                     This file
 
 - Windows host with Python available
 - Baumer camera reachable over GigE
-- Baumer Python SDK package: `neoapi`
+- Baumer official `neoAPI` Python package matching your installed Python version
 - `numpy`
 - `opencv-python`
 
@@ -52,6 +52,14 @@ Create or activate your virtual environment, then install dependencies:
 pip install -r requirements.txt
 ```
 
+Then install the **official Baumer neoAPI Python package** that matches your Python version.
+
+Important:
+
+- do **not** rely on the unrelated `neoapi` package from PyPI if it throws Python 2 style syntax errors
+- use the Baumer-provided wheel/installer that comes with their SDK or tools
+- make sure the package matches your interpreter version, such as Python 3.10
+
 ## Commands
 
 ### Preflight check
@@ -61,6 +69,8 @@ This validates that Python can import the required runtime packages without tryi
 ```powershell
 python -m src.main --preflight-only
 ```
+
+If preflight reports that `neoapi` is not Python 3 compatible, uninstall the incorrect package and install the Baumer-provided one instead.
 
 Optional JSON output:
 
@@ -86,12 +96,36 @@ This command:
   - `output\test_frame_last.jpg`
 - exits with code `0` on pass and non-zero on failure
 
+### Live preview
+
+If you want a lightweight visual check of the camera feed, use preview mode:
+
+```powershell
+python -m src.main --preview
+```
+
+This opens an OpenCV window with:
+
+- the live camera image
+- an FPS overlay
+- the pixel format
+- a quit hint
+
+Press `q` or `Esc` to close the preview.
+
+For a timed preview:
+
+```powershell
+python -m src.main --preview --stream-seconds 30
+```
+
 ### Useful options
 
 ```powershell
 python -m src.main --camera-id <camera-id>
 python -m src.main --grab-timeout-ms 1000
 python -m src.main --expected-fps-threshold 30
+python -m src.main --preview --preview-max-width 1280
 python -m src.main --json
 ```
 
@@ -100,6 +134,9 @@ Arguments:
 - `--camera-id`: target a specific camera deterministically
 - `--grab-timeout-ms`: per-frame timeout in milliseconds
 - `--expected-fps-threshold`: minimum FPS required for a passing run
+- `--preview`: open a lightweight live preview window
+- `--stream-seconds`: auto-stop preview after the given duration
+- `--preview-max-width`: downscale preview display width to keep the window light
 - `--json`: machine-readable output
 
 ## Output format

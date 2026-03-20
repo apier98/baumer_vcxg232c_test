@@ -74,7 +74,9 @@ The project now includes a Python headless test harness aligned with this plan:
 
 `pip install -r requirements.txt`
 
-Installs the required runtime packages for the harness.
+Installs the open-source runtime packages for the harness.
+
+Install the official Baumer `neoAPI` Python package separately from Baumer's SDK/tooling for your Python version.
 
 `python -m src.main --preflight-only`
 
