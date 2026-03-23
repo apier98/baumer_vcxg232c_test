@@ -25,8 +25,10 @@ README.md                     This file
 - Windows host with Python available
 - Baumer camera reachable over GigE
 - Baumer official `neoAPI` Python package matching your installed Python version
-- `numpy`
+- `numpy==1.26.4`
 - `opencv-python`
+- `onnxruntime==1.17.1` or `onnxruntime-gpu==1.17.1`
+- `pillow==12.0.0`
 
 ## Network and hardware prerequisites
 
@@ -51,6 +53,46 @@ Create or activate your virtual environment, then install dependencies:
 ```powershell
 pip install -r requirements.txt
 ```
+
+For RF-DETR bundle inference, keep the environment aligned with the bundle runtime. The exported bundle you provided was built against:
+
+- `numpy==1.26.4`
+- `onnxruntime==1.17.1` or `onnxruntime-gpu==1.17.1`
+
+Important environment warning for inference:
+
+- do **not** keep `numpy 2.x` in this virtual environment for the current bundle/runtime stack
+- install **only one** ONNX Runtime variant at a time:
+  - `onnxruntime==1.17.1` for CPU
+  - `onnxruntime-gpu==1.17.1` for CUDA
+- if both `onnxruntime` and `onnxruntime-gpu` are installed together, Python may load the CPU wheel and you may see only `CPUExecutionProvider`
+
+If this virtual environment already has `numpy 2.x`, force it back to the compatible stack before running preview inference:
+
+```powershell
+pip install --force-reinstall numpy==1.26.4 onnxruntime==1.17.1 pillow==12.0.0
+```
+
+If you want CUDA execution, install the GPU wheel instead of the CPU wheel:
+
+```powershell
+pip install --force-reinstall numpy==1.26.4 onnxruntime-gpu==1.17.1 pillow==12.0.0
+```
+
+If you previously installed both ONNX Runtime variants, clean the environment first:
+
+```powershell
+pip uninstall -y onnxruntime onnxruntime-gpu
+pip install numpy==1.26.4 onnxruntime-gpu==1.17.1 pillow==12.0.0
+```
+
+You can verify that the GPU runtime is visible with:
+
+```powershell
+python -c "import onnxruntime as ort; print(ort.get_available_providers())"
+```
+
+You should see `CUDAExecutionProvider` in the output before expecting GPU inference.
 
 Then install the **official Baumer neoAPI Python package** that matches your Python version.
 
@@ -119,6 +161,51 @@ For a timed preview:
 python -m src.main --preview --stream-seconds 30
 ```
 
+### Live preview with RF-DETR inference
+
+To run your exported deployment bundle on top of the Baumer stream, use preview mode with inference enabled.
+
+Recommended bundle location inside this repo:
+
+- copy the **contents** of your exported folder into `bundles\rfdetr\`
+- after copying, files such as `model.onnx`, `infer.py`, `model_config.json`, and `rfdetr_training\` should exist directly under `bundles\rfdetr\`
+
+With your current export, that means copying the contents of:
+
+- `C:\Users\andrea\projects\rfdetr_training\datasets\8cb2dc0f-6405-47fd-b4f9-332e2fdeaa19\deploy\checkpoint_portable_20260323_135651Z\`
+
+Then run:
+
+```powershell
+python -m src.main --preview --infer
+```
+
+If you want to keep the timestamped export folder name instead, pass that directory explicitly:
+
+```powershell
+python -m src.main --preview --inference-bundle-dir C:\path\to\checkpoint_portable_20260323_135651Z
+```
+
+Useful inference options:
+
+- `--inference-backend onnx` to force ONNX Runtime
+- `--inference-threshold 0.5` to override the bundle score threshold
+- `--inference-topk 100` to limit detections before final filtering
+- `--inference-device cpu` to force CPU execution
+
+For GPU inference, prefer this command once `CUDAExecutionProvider` is available:
+
+```powershell
+python -m src.main --preview --infer --inference-backend onnx --inference-device cuda
+```
+
+The preview overlay will show:
+
+- stream FPS
+- camera pixel format
+- active inference backend
+- detections found in the current frame
+
 ### Interactive parameter selection
 
 If you want to interactively explore and test camera parameters (features), use the interactive mode:
@@ -156,6 +243,8 @@ python -m src.main --camera-id <camera-id>
 python -m src.main --grab-timeout-ms 1000
 python -m src.main --expected-fps-threshold 30
 python -m src.main --preview --preview-max-width 1280
+python -m src.main --preview --infer
+python -m src.main --preview --inference-bundle-dir bundles\rfdetr --inference-backend onnx
 python -m src.main --json
 ```
 
@@ -167,6 +256,12 @@ Arguments:
 - `--preview`: open a lightweight live preview window
 - `--stream-seconds`: auto-stop preview after the given duration
 - `--preview-max-width`: downscale preview display width to keep the window light
+- `--infer`: enable RF-DETR overlay using the default `bundles\rfdetr` bundle location
+- `--inference-bundle-dir`: portable RF-DETR bundle directory to use instead of the default
+- `--inference-backend`: choose `auto`, `onnx`, `tensorrt`, or `pytorch`
+- `--inference-threshold`: override the bundle score threshold
+- `--inference-topk`: override bundle top-k before post-processing
+- `--inference-device`: choose a device such as `cpu` or `cuda`
 - `--json`: machine-readable output
 
 ## Output format
@@ -193,10 +288,11 @@ Plain-text output includes:
 4. Run `python -m src.main --frame-count 200 --output-dir output`.
 5. Inspect `output\test_frame_first.jpg` and `output\test_frame_last.jpg`.
 6. Compare measured FPS with the expected operating range from the docs.
+7. Copy your RF-DETR deployment bundle to `bundles\rfdetr` and run `python -m src.main --preview --infer` when you want live detection overlay.
 
 ## Current scope
 
-This repository currently implements the baseline camera-only validation path.
+This repository currently implements the baseline camera validation path plus optional RF-DETR inference overlay during live preview.
 
 It does not yet include:
 

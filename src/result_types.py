@@ -59,6 +59,10 @@ class LivePreviewResult:
     frames_displayed: int
     elapsed_seconds: float
     fps: float
+    inference_enabled: bool = False
+    inference_backend: str | None = None
+    inference_bundle_dir: Path | None = None
+    frames_with_detections: int = 0
     error: str | None = None
 
     def to_summary(self) -> str:
@@ -73,9 +77,21 @@ class LivePreviewResult:
             f"ELAPSED_SECONDS {self.elapsed_seconds:.3f}",
             f"FPS {self.fps:.3f}",
         ]
+        if self.inference_enabled:
+            lines.extend(
+                [
+                    f"INFERENCE_BACKEND {self.inference_backend or 'unknown'}",
+                    f"INFERENCE_BUNDLE {self.inference_bundle_dir if self.inference_bundle_dir else 'unknown'}",
+                    f"FRAMES_WITH_DETECTIONS {self.frames_with_detections}",
+                ]
+            )
         if self.error:
             lines.append(f"ERROR {self.error}")
         return "\n".join(lines)
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2)
+        payload = asdict(self)
+        payload["inference_bundle_dir"] = (
+            str(self.inference_bundle_dir) if self.inference_bundle_dir else None
+        )
+        return json.dumps(payload, indent=2)

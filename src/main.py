@@ -12,7 +12,7 @@ from .camera_test import (
     run_interactive_mode,
     run_live_preview,
 )
-from .config import TestConfig
+from .config import InferenceConfig, TestConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,6 +82,44 @@ def build_parser() -> argparse.ArgumentParser:
         default=1280,
         help="Maximum preview window width in pixels. Larger frames are downscaled for display only.",
     )
+    parser.add_argument(
+        "--infer",
+        action="store_true",
+        help=(
+            "Run RF-DETR inference on preview frames. Uses bundles\\rfdetr by default unless "
+            "--inference-bundle-dir is provided."
+        ),
+    )
+    parser.add_argument(
+        "--inference-bundle-dir",
+        type=Path,
+        default=None,
+        help="Portable RF-DETR bundle directory. Preview mode only.",
+    )
+    parser.add_argument(
+        "--inference-backend",
+        choices=["auto", "tensorrt", "onnx", "pytorch"],
+        default="auto",
+        help="Inference backend preference for the RF-DETR bundle.",
+    )
+    parser.add_argument(
+        "--inference-device",
+        type=str,
+        default=None,
+        help="Inference device override, for example cpu, cuda, or cuda:0.",
+    )
+    parser.add_argument(
+        "--inference-threshold",
+        type=float,
+        default=None,
+        help="Optional RF-DETR score threshold override.",
+    )
+    parser.add_argument(
+        "--inference-topk",
+        type=int,
+        default=None,
+        help="Optional RF-DETR top-k override before post-processing.",
+    )
     return parser
 
 
@@ -95,12 +133,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.preflight_only:
         return _run_preflight(json_output=args.json)
 
+    inference_requested = args.infer or args.inference_bundle_dir is not None
+    if inference_requested and not args.preview:
+        parser.error("RF-DETR inference overlay is only supported with --preview.")
+    if args.inference_threshold is not None and args.inference_threshold <= 0:
+        parser.error("--inference-threshold must be greater than zero.")
+    if args.inference_topk is not None and args.inference_topk <= 0:
+        parser.error("--inference-topk must be greater than zero.")
+
+    inference_config = None
+    if inference_requested:
+        inference_config = InferenceConfig(
+            bundle_dir=args.inference_bundle_dir or Path("bundles") / "rfdetr",
+            backend=args.inference_backend,
+            device=args.inference_device,
+            score_threshold=args.inference_threshold,
+            topk=args.inference_topk,
+        )
+
     config = TestConfig(
         frame_count=args.frame_count,
         output_dir=args.output_dir,
         camera_id=args.camera_id,
         grab_timeout_ms=args.grab_timeout_ms,
         expected_fps_threshold=args.expected_fps_threshold,
+        inference=inference_config,
     )
 
     try:
@@ -147,6 +204,8 @@ def _run_preflight(json_output: bool) -> int:
         print("RUNTIME neoapi=" + versions["neoapi"])
         print("RUNTIME opencv-python=" + versions["opencv-python"])
         print("RUNTIME numpy=" + versions["numpy"])
+        print("RUNTIME onnxruntime=" + versions["onnxruntime"])
+        print("RUNTIME pillow=" + versions["pillow"])
 
     return 0
 

@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
+import subprocess
+import sys
 from time import perf_counter
 from typing import Any
 
 from .config import TestConfig
+from .inference import InferenceError, LiveInferenceOverlay
 from .result_types import CameraTestResult, LivePreviewResult
 
 
@@ -21,7 +24,7 @@ class RuntimeDependencies:
     numpy: Any
 
 
-def load_runtime_dependencies() -> RuntimeDependencies:
+def load_runtime_dependencies(*, require_inference: bool = False) -> RuntimeDependencies:
     errors: list[str] = []
 
     neoapi = _load_optional_dependency(
@@ -45,6 +48,19 @@ def load_runtime_dependencies() -> RuntimeDependencies:
         install_hint="Install it with `pip install -r requirements.txt`.",
         errors=errors,
     )
+    if require_inference:
+        _load_optional_dependency(
+            import_name="onnxruntime",
+            package_name="onnxruntime",
+            install_hint="Install it with `pip install -r requirements.txt`.",
+            errors=errors,
+        )
+        _load_optional_dependency(
+            import_name="PIL",
+            package_name="pillow",
+            install_hint="Install it with `pip install -r requirements.txt`.",
+            errors=errors,
+        )
 
     if errors:
         raise CameraTestError("Runtime dependency check failed:\n- " + "\n- ".join(errors))
@@ -147,16 +163,28 @@ def run_live_preview(
     if stream_seconds is not None and stream_seconds <= 0:
         raise CameraTestError("stream_seconds must be greater than zero when provided.")
 
-    dependencies = load_runtime_dependencies()
+    dependencies = load_runtime_dependencies(require_inference=config.inference is not None)
     cam = dependencies.neoapi.Cam()
     window_name = "Baumer Live Preview"
     metadata = CameraMetadata(None, None, None, None, None, None)
     frames_displayed = 0
+    frames_with_detections = 0
     started_at = 0.0
+    inference_overlay = None
+    inference_backend = None
+    inference_bundle_dir = (
+        config.inference.resolved_bundle_dir() if config.inference is not None else None
+    )
 
     try:
         _connect_camera(cam, config.camera_id)
         metadata = _read_camera_metadata(cam)
+        if config.inference is not None:
+            try:
+                inference_overlay = LiveInferenceOverlay(config.inference)
+            except InferenceError as exc:
+                raise CameraTestError(f"Failed to initialize RF-DETR inference: {exc}") from exc
+            inference_backend = inference_overlay.backend
         dependencies.cv2.namedWindow(window_name, dependencies.cv2.WINDOW_NORMAL)
         started_at = perf_counter()
 
@@ -172,9 +200,24 @@ def run_live_preview(
 
             frames_displayed += 1
             elapsed_seconds = perf_counter() - started_at
-            preview_frame = _prepare_preview_frame(
+            preview_frame = _convert_frame_for_preview(
                 frame=frame,
                 pixel_format=metadata.pixel_format,
+                cv2_module=dependencies.cv2,
+            )
+            detection_count = 0
+            if inference_overlay is not None:
+                try:
+                    preview_frame, detection_count = inference_overlay.annotate_frame(
+                        preview_frame,
+                        cv2_module=dependencies.cv2,
+                    )
+                except InferenceError as exc:
+                    raise CameraTestError(f"Failed to run RF-DETR inference: {exc}") from exc
+                if detection_count > 0:
+                    frames_with_detections += 1
+            preview_frame = _resize_preview_frame(
+                frame=preview_frame,
                 cv2_module=dependencies.cv2,
                 max_width=preview_max_width,
             )
@@ -183,6 +226,8 @@ def run_live_preview(
                 fps=frames_displayed / elapsed_seconds if elapsed_seconds > 0 else 0.0,
                 pixel_format=metadata.pixel_format,
                 cv2_module=dependencies.cv2,
+                inference_backend=inference_backend,
+                detection_count=detection_count,
             )
             dependencies.cv2.imshow(window_name, preview_frame)
 
@@ -207,6 +252,10 @@ def run_live_preview(
             frames_displayed=frames_displayed,
             elapsed_seconds=0.0 if started_at == 0.0 else perf_counter() - started_at,
             fps=0.0,
+            inference_enabled=config.inference is not None,
+            inference_backend=inference_backend,
+            inference_bundle_dir=inference_bundle_dir,
+            frames_with_detections=frames_with_detections,
             error=str(exc),
         )
     finally:
@@ -229,6 +278,10 @@ def run_live_preview(
         frames_displayed=frames_displayed,
         elapsed_seconds=elapsed_seconds,
         fps=fps,
+        inference_enabled=config.inference is not None,
+        inference_backend=inference_backend,
+        inference_bundle_dir=inference_bundle_dir,
+        frames_with_detections=frames_with_detections,
     )
 
 
@@ -386,6 +439,8 @@ def describe_runtime() -> dict[str, str]:
         "opencv-python": _read_module_version(dependencies.cv2),
         "numpy": _read_module_version(dependencies.numpy),
     }
+    versions["onnxruntime"] = _read_optional_module_version("onnxruntime")
+    versions["pillow"] = _read_optional_module_version("PIL")
     return versions
 
 
@@ -407,8 +462,29 @@ def _load_optional_dependency(
             f"({exc.msg} in {exc.filename}:{exc.lineno}). {install_hint}"
         )
     except Exception as exc:
-        errors.append(f"{package_name} failed to import: {exc}. {install_hint}")
+        errors.append(_format_dependency_import_error(package_name, exc, install_hint))
     return None
+
+
+def _format_dependency_import_error(
+    package_name: str,
+    exc: Exception,
+    install_hint: str,
+) -> str:
+    message = f"{package_name} failed to import: {exc}. {install_hint}"
+    error_text = f"{type(exc).__name__}: {exc}".lower()
+    if package_name == "onnxruntime" and (
+        "_array_api" in error_text
+        or "compiled using numpy 1.x" in error_text
+        or "numpy 2" in error_text
+    ):
+        return (
+            f"{package_name} failed to import because the installed ONNX Runtime wheel is not compatible "
+            "with the current NumPy version. Reinstall a NumPy 1.x runtime that matches the bundle, for example "
+            "`pip install --force-reinstall numpy==1.26.4 onnxruntime==1.17.1`, or use "
+            "`onnxruntime-gpu==1.17.1` instead of `onnxruntime==1.17.1` if you need CUDA."
+        )
+    return message
 
 
 @dataclass(frozen=True)
@@ -497,7 +573,7 @@ def _save_artifacts(first_frame: Any, last_frame: Any, output_dir: Path, cv2_mod
     return first_frame_path, last_frame_path
 
 
-def _prepare_preview_frame(frame: Any, pixel_format: str | None, cv2_module: Any, max_width: int) -> Any:
+def _convert_frame_for_preview(frame: Any, pixel_format: str | None, cv2_module: Any) -> Any:
     preview_frame = frame
     normalized_format = (pixel_format or "").lower()
 
@@ -512,24 +588,41 @@ def _prepare_preview_frame(frame: Any, pixel_format: str | None, cv2_module: Any
     elif len(getattr(frame, "shape", ())) == 2:
         preview_frame = cv2_module.cvtColor(frame, cv2_module.COLOR_GRAY2BGR)
 
-    height, width = preview_frame.shape[:2]
-    if width > max_width:
-        scale = max_width / width
-        preview_frame = cv2_module.resize(
-            preview_frame,
-            (int(width * scale), int(height * scale)),
-            interpolation=cv2_module.INTER_AREA,
-        )
-
     return preview_frame
 
 
-def _draw_preview_overlay(frame: Any, fps: float, pixel_format: str | None, cv2_module: Any) -> None:
+def _resize_preview_frame(frame: Any, cv2_module: Any, max_width: int) -> Any:
+    height, width = frame.shape[:2]
+    if width > max_width:
+        scale = max_width / width
+        return cv2_module.resize(
+            frame,
+            (int(width * scale), int(height * scale)),
+            interpolation=cv2_module.INTER_AREA,
+        )
+    return frame
+
+
+def _draw_preview_overlay(
+    frame: Any,
+    fps: float,
+    pixel_format: str | None,
+    cv2_module: Any,
+    inference_backend: str | None = None,
+    detection_count: int = 0,
+) -> None:
     overlay_lines = [
         f"FPS {fps:.2f}",
         f"FORMAT {pixel_format or 'unknown'}",
-        "Press Q or Esc to quit",
     ]
+    if inference_backend is not None:
+        overlay_lines.extend(
+            [
+                f"INFER {inference_backend}",
+                f"DETECTIONS {detection_count}",
+            ]
+        )
+    overlay_lines.append("Press Q or Esc to quit")
     y = 30
     for line in overlay_lines:
         cv2_module.putText(
@@ -665,3 +758,31 @@ def _read_module_version(module: Any) -> str:
     if version is not None:
         return str(version)
     return "unknown"
+
+
+def _read_optional_module_version(import_name: str) -> str:
+    probe = (
+        "import importlib, sys\n"
+        "name = sys.argv[1]\n"
+        "try:\n"
+        "    module = importlib.import_module(name)\n"
+        "except ModuleNotFoundError:\n"
+        "    raise SystemExit(2)\n"
+        "except Exception as exc:\n"
+        "    print(f'import_failed: {exc}')\n"
+        "    raise SystemExit(1)\n"
+        "version = getattr(module, '__version__', None)\n"
+        "print(version if version is not None else 'unknown')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe, import_name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip() or "unknown"
+    if result.returncode == 2:
+        return "not_installed"
+    error = result.stdout.strip() or result.stderr.strip()
+    return error or "import_failed"
