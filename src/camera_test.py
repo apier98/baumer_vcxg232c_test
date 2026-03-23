@@ -232,6 +232,153 @@ def run_live_preview(
     )
 
 
+def run_interactive_mode(config: TestConfig) -> None:
+    dependencies = load_runtime_dependencies()
+    print(f"Connecting to camera '{config.camera_id or 'any'}'...")
+    cam = dependencies.neoapi.Cam()
+
+    try:
+        _connect_camera(cam, config.camera_id)
+        metadata = _read_camera_metadata(cam)
+        
+        # Ensure we show something even if metadata is empty
+        model = metadata.model if metadata.model else "[Unknown Model]"
+        device_id = metadata.device_id if metadata.device_id else "[Unknown ID]"
+        ip = metadata.ip_address if metadata.ip_address else "[Unknown IP]"
+        
+        print(f"\nConnected to: {model} ({device_id}) at {ip}")
+        print("Interactive mode active. Type 'help' for commands.\n")
+
+        while True:
+            try:
+                line = input("camera> ").strip()
+            except EOFError:
+                print("\nExiting interactive mode (EOF).")
+                break
+            except KeyboardInterrupt:
+                print("\nExiting interactive mode (Interrupt).")
+                break
+
+            if not line:
+                continue
+
+            parts = line.split()
+            cmd = parts[0].lower()
+            args = parts[1:]
+
+            if cmd in ("exit", "quit"):
+                break
+            elif cmd == "help":
+                print("\nAvailable commands:")
+                print("  ls [filter]         - List features (optional filter by name)")
+                print("  get <feature>       - Get current value of a feature")
+                print("  set <feature> <val> - Set a feature value")
+                print("  info                - Show detailed camera metadata")
+                print("  help                - Show this help message")
+                print("  exit, quit          - Disconnect and exit\n")
+            elif cmd == "ls":
+                _list_features(cam, args[0] if args else "")
+            elif cmd == "get":
+                if not args:
+                    print("Error: Missing feature name. Usage: get <feature>")
+                else:
+                    _get_feature(cam, args[0])
+            elif cmd == "set":
+                if len(args) < 2:
+                    print("Error: Missing feature name or value. Usage: set <feature> <value>")
+                else:
+                    _set_feature(cam, args[0], args[1])
+            elif cmd == "info":
+                _print_camera_info(cam)
+            else:
+                print(f"Unknown command: {cmd}. Type 'help' for available commands.")
+
+    except Exception as exc:
+        print(f"\nInteractive session error: {exc}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        _disconnect_camera(cam)
+        print("Camera disconnected.")
+
+
+def _list_features(cam: Any, filter_str: str) -> None:
+    try:
+        features = cam.GetFeatureList()
+        found = 0
+        filter_str = filter_str.lower()
+        print(f"{'Feature Name':<40} | {'Interface':<15} | {'Value'}")
+        print("-" * 80)
+        for feature in features:
+            name = feature.GetName()
+            if not filter_str or filter_str in name.lower():
+                try:
+                    val = _read_feature_value(feature)
+                    interface = _read_feature_interface(feature)
+                    print(f"{name:<40} | {interface:<15} | {val}")
+                    found += 1
+                except Exception as exc:
+                    print(f"{name:<40} | {'[Unavailable]':<15} | [Error: {exc}]")
+                    found += 1
+        print(f"\nTotal: {found} features matched.")
+    except Exception as exc:
+        print(f"Failed to list features: {exc}")
+
+
+def _get_feature(cam: Any, name: str) -> None:
+    try:
+        feature = _lookup_feature(cam, name)
+        if feature is None:
+            print(f"Error: Feature '{name}' not found.")
+            return
+
+        if not feature.IsReadable():
+            print(f"Error: Feature '{name}' is not readable.")
+            return
+
+        print(f"{name} = {_read_feature_value(feature)}")
+        print(f"  Interface: {_read_feature_interface(feature)}")
+        print(f"  Access: {'RW' if feature.IsWritable() else 'R'}")
+    except Exception as exc:
+        print(f"Error reading feature '{name}': {exc}")
+
+
+def _set_feature(cam: Any, name: str, value: str) -> None:
+    try:
+        feature = _lookup_feature(cam, name)
+        if feature is None:
+            print(f"Error: Feature '{name}' not found.")
+            return
+
+        if not feature.IsWritable():
+            print(f"Error: Feature '{name}' is not writable.")
+            return
+
+        old_val = _read_feature_value(feature) if feature.IsReadable() else "[unknown]"
+        feature.SetString(value)
+        new_val = _read_feature_value(feature) if feature.IsReadable() else "[write-only]"
+        print(f"Successfully updated {name}: {old_val} -> {new_val}")
+    except Exception as exc:
+        print(f"Error setting feature '{name}' to '{value}': {exc}")
+
+
+def _print_camera_info(cam: Any) -> None:
+    metadata = _read_camera_metadata(cam)
+    print("\nCamera Information:")
+    print(f"  Model Name:         {metadata.model}")
+    print(f"  Device ID:          {metadata.device_id}")
+    print(f"  Current IP:         {metadata.ip_address}")
+    print(f"  Pixel Format:       {metadata.pixel_format}")
+    print(f"  Image Size:         {metadata.width} x {metadata.height}")
+
+    # Additional standard features if available
+    for extra in ["DeviceVendorName", "DeviceVersion", "DeviceFirmwareVersion", "GevCurrentSubnetMask"]:
+        val = _read_optional_feature(cam, extra)
+        if val:
+            print(f"  {extra:<20}: {val}")
+    print("")
+
+
 def describe_runtime() -> dict[str, str]:
     dependencies = load_runtime_dependencies()
     versions = {
@@ -434,6 +581,62 @@ def _read_optional_feature(cam: Any, *feature_names: str) -> str | None:
             return str(value)
 
     return None
+
+
+def _lookup_feature(cam: Any, name: str) -> Any | None:
+    features = getattr(cam, "f", None)
+    if features is not None:
+        feature = getattr(features, name, None)
+        if feature is not None:
+            return feature
+
+    getter = getattr(cam, "GetFeature", None)
+    if getter is None:
+        return None
+
+    try:
+        return getter(name)
+    except Exception:
+        return None
+
+
+def _read_feature_value(feature: Any) -> str:
+    if not feature.IsReadable():
+        return "[Not Readable]"
+
+    for getter_name in ("GetString", "GetValue", "GetInt", "Get"):
+        getter = getattr(feature, getter_name, None)
+        if getter is None:
+            continue
+        try:
+            value = getter()
+        except Exception:
+            continue
+        if value is None:
+            continue
+        return str(value)
+
+    value = getattr(feature, "value", None)
+    if value is not None:
+        return str(value)
+
+    raise RuntimeError("No readable value getter available.")
+
+
+def _read_feature_interface(feature: Any) -> str:
+    for getter_name in ("GetInterfaceName", "GetInterface"):
+        getter = getattr(feature, getter_name, None)
+        if getter is None:
+            continue
+        try:
+            value = getter()
+        except Exception:
+            continue
+        if value is None:
+            continue
+        return str(value)
+
+    return "[Unknown]"
 
 
 def _coerce_int(value: str | None) -> int | None:

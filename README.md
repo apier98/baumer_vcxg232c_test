@@ -119,6 +119,36 @@ For a timed preview:
 python -m src.main --preview --stream-seconds 30
 ```
 
+### Interactive parameter selection
+
+If you want to interactively explore and test camera parameters (features), use the interactive mode:
+
+```powershell
+python -m src.main --interactive
+```
+
+Available commands in interactive mode:
+
+- `ls [filter]`: List all available features (optionally filtered by name).
+- `get <feature>`: Show the current value and metadata for a specific feature.
+- `set <feature> <value>`: Update a feature's value.
+- `info`: Display detailed camera metadata.
+- `help`: Show the list of available commands.
+- `exit` or `quit`: Disconnect and exit.
+
+Example session:
+```text
+camera> ls Exposure
+ExposureAuto                             | Enumeration     | Off
+ExposureTime                             | Float           | 10000.0
+...
+camera> set ExposureTime 20000
+Successfully updated ExposureTime: 10000.0 -> 20000.0
+camera> info
+...
+camera> quit
+```
+
 ### Useful options
 
 ```powershell

@@ -5,7 +5,13 @@ import json
 import sys
 from pathlib import Path
 
-from .camera_test import CameraTestError, describe_runtime, run_headless_test, run_live_preview
+from .camera_test import (
+    CameraTestError,
+    describe_runtime,
+    run_headless_test,
+    run_interactive_mode,
+    run_live_preview,
+)
 from .config import TestConfig
 
 
@@ -59,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Open a lightweight live preview window instead of running the bounded frame test.",
     )
     parser.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="Enter interactive mode to get/set camera parameters.",
+    )
+    parser.add_argument(
         "--stream-seconds",
         type=float,
         default=None,
@@ -77,6 +89,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if not args.json and not args.preflight_only:
+        print(f"DEBUG: Starting main with args: {argv}")
+
     if args.preflight_only:
         return _run_preflight(json_output=args.json)
 
@@ -89,7 +104,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        if args.preview:
+        if args.interactive:
+            run_interactive_mode(config)
+            return 0
+        elif args.preview:
             result = run_live_preview(
                 config=config,
                 stream_seconds=args.stream_seconds,
