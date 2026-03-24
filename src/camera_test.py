@@ -389,7 +389,8 @@ def _get_feature(cam: Any, name: str) -> None:
             print(f"Error: Feature '{name}' is not readable.")
             return
 
-        print(f"{name} = {_read_feature_value(feature)}")
+        resolved_name = _feature_display_name(feature, fallback=name)
+        print(f"{resolved_name} = {_read_feature_value(feature)}")
         print(f"  Interface: {_read_feature_interface(feature)}")
         print(f"  Access: {'RW' if feature.IsWritable() else 'R'}")
     except Exception as exc:
@@ -407,10 +408,11 @@ def _set_feature(cam: Any, name: str, value: str) -> None:
             print(f"Error: Feature '{name}' is not writable.")
             return
 
+        resolved_name = _feature_display_name(feature, fallback=name)
         old_val = _read_feature_value(feature) if feature.IsReadable() else "[unknown]"
-        feature.SetString(value)
+        _write_feature_value(feature, value)
         new_val = _read_feature_value(feature) if feature.IsReadable() else "[write-only]"
-        print(f"Successfully updated {name}: {old_val} -> {new_val}")
+        print(f"Successfully updated {resolved_name}: {old_val} -> {new_val}")
     except Exception as exc:
         print(f"Error setting feature '{name}' to '{value}': {exc}")
 
@@ -658,7 +660,7 @@ def _read_optional_feature(cam: Any, *feature_names: str) -> str | None:
         feature = getattr(features, feature_name, None)
         if feature is None:
             continue
-        for getter_name in ("GetString", "GetValue", "GetInt", "Get"):
+        for getter_name in ("GetString", "GetValue", "GetInt", "GetDouble", "GetFloat", "GetBool", "Get"):
             getter = getattr(feature, getter_name, None)
             if getter is None:
                 continue
@@ -677,6 +679,30 @@ def _read_optional_feature(cam: Any, *feature_names: str) -> str | None:
 
 
 def _lookup_feature(cam: Any, name: str) -> Any | None:
+    feature = _lookup_feature_by_exact_name(cam, name)
+    if feature is not None:
+        return feature
+
+    normalized_name = name.casefold()
+    feature_names = _list_feature_names(cam)
+
+    for feature_name in feature_names:
+        if feature_name.casefold() != normalized_name:
+            continue
+        return _lookup_feature_by_exact_name(cam, feature_name)
+
+    prefix_matches = [
+        feature_name
+        for feature_name in feature_names
+        if feature_name.casefold().startswith(normalized_name)
+    ]
+    if len(prefix_matches) == 1:
+        return _lookup_feature_by_exact_name(cam, prefix_matches[0])
+
+    return None
+
+
+def _lookup_feature_by_exact_name(cam: Any, name: str) -> Any | None:
     features = getattr(cam, "f", None)
     if features is not None:
         feature = getattr(features, name, None)
@@ -693,11 +719,30 @@ def _lookup_feature(cam: Any, name: str) -> Any | None:
         return None
 
 
+def _list_feature_names(cam: Any) -> list[str]:
+    getter = getattr(cam, "GetFeatureList", None)
+    if getter is None:
+        return []
+
+    try:
+        features = getter()
+    except Exception:
+        return []
+
+    names: list[str] = []
+    for feature in features:
+        feature_name = _feature_display_name(feature)
+        if feature_name is None:
+            continue
+        names.append(feature_name)
+    return names
+
+
 def _read_feature_value(feature: Any) -> str:
     if not feature.IsReadable():
         return "[Not Readable]"
 
-    for getter_name in ("GetString", "GetValue", "GetInt", "Get"):
+    for getter_name in ("GetString", "GetValue", "GetInt", "GetDouble", "GetFloat", "GetBool", "Get"):
         getter = getattr(feature, getter_name, None)
         if getter is None:
             continue
@@ -730,6 +775,82 @@ def _read_feature_interface(feature: Any) -> str:
         return str(value)
 
     return "[Unknown]"
+
+
+def _feature_display_name(feature: Any, fallback: str | None = None) -> str | None:
+    getter = getattr(feature, "GetName", None)
+    if getter is not None:
+        try:
+            value = getter()
+        except Exception:
+            value = None
+        if value is not None:
+            return str(value)
+
+    name = getattr(feature, "name", None)
+    if name is not None:
+        return str(name)
+
+    return fallback
+
+
+def _write_feature_value(feature: Any, raw_value: str) -> None:
+    interface = _read_feature_interface(feature).casefold()
+
+    if interface in {"ifloat", "idouble"}:
+        typed_value = float(raw_value)
+        setter_attempts = (
+            ("SetDouble", typed_value),
+            ("SetFloat", typed_value),
+            ("SetValue", typed_value),
+            ("Set", typed_value),
+        )
+    elif interface == "iinteger":
+        typed_value = int(raw_value, 0)
+        setter_attempts = (
+            ("SetInt", typed_value),
+            ("SetValue", typed_value),
+            ("Set", typed_value),
+        )
+    elif interface == "iboolean":
+        typed_value = _parse_bool_feature_value(raw_value)
+        setter_attempts = (
+            ("SetBool", typed_value),
+            ("SetValue", typed_value),
+            ("Set", typed_value),
+        )
+    else:
+        setter_attempts = (
+            ("SetString", raw_value),
+            ("SetValue", raw_value),
+            ("Set", raw_value),
+        )
+
+    errors: list[str] = []
+    for setter_name, typed_value in setter_attempts:
+        setter = getattr(feature, setter_name, None)
+        if setter is None:
+            continue
+        try:
+            setter(typed_value)
+            return
+        except Exception as exc:
+            errors.append(f"{setter_name} failed: {exc}")
+
+    if errors:
+        raise RuntimeError("; ".join(errors))
+    raise RuntimeError("No compatible setter available for this feature.")
+
+
+def _parse_bool_feature_value(raw_value: str) -> bool:
+    normalized_value = raw_value.strip().casefold()
+    if normalized_value in {"1", "true", "on", "yes"}:
+        return True
+    if normalized_value in {"0", "false", "off", "no"}:
+        return False
+    raise ValueError(
+        f"Invalid boolean value '{raw_value}'. Use one of: true, false, 1, 0, on, off, yes, no."
+    )
 
 
 def _coerce_int(value: str | None) -> int | None:
